@@ -158,28 +158,7 @@ project/
 └── README.md
 ```
 
----
 
-## Rules JSON Format
-
-```json
-{
-  "variables": {
-    "m5": {
-      "range": [0, 3]
-    }
-  },
-  "rules": [
-    {
-      "condition": "laser > 50 and m1 == 1",
-      "assign": { "m5": 3 }
-    },
-    {
-      "condition": "laser < 20 and m1 == 0",
-      "assign": { "m5": 0 }
-    }
-  ]
-}
 ```
 
 Rules use pandas `eval`-compatible condition strings. A row is only labeled once — first matching rule applies, later rules are skipped for that row.
