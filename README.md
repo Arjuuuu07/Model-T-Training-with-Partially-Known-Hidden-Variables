@@ -145,14 +145,14 @@ Starting from less than 30% labeled data, the framework recovers the full traini
 ```
 project/
 │
-├── data/
-│   └── Master_data.csv          # dataset: observed features + target
+|
+│- Master_data.csv          # dataset: observed features + target
 │
-├── rules/
-│   └── NEW_RULE.json            # rules for partial hidden variable labeling
+|
+│-NEW_RULE.json            # rules for partial hidden variable labeling
 │
-├── notebooks/
-│   └── model_t_pipeline.ipynb   # full pipeline
+|
+│- model_t_pipeline.ipynb   # full pipeline
 │
 ├── requirements.txt
 └── README.md
