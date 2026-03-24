@@ -4,17 +4,32 @@
 
 ---
 
-## The Core Idea
+## The Problem
 
-In many real-world datasets, there is a variable that influences the output but is **not recorded for every row**. It might be expensive to measure, only observable under certain conditions, or simply missing for most of the dataset.
+In many real-world systems, the relationship between inputs and outputs is governed by a variable that is expensive, delayed, or impossible to measure consistently. Call it the **Hidden Governor**.
 
-The standard reaction to this is to either drop those rows or ignore the variable entirely. Both approaches throw away useful information.
+Consider cardiac monitoring as a motivating example. Blood flow (*y*) is driven by mechanical features like heart rate and valve diameter. But these features are modulated by hormone levels — a chemical governor that shifts the entire input-output relationship. Hormone levels are only available for ~30% of cases due to the cost and delay of blood tests.
 
-**Model-T takes a different approach:**
+A standard ML model, trained without hormone data, encounters two completely different "chemical states" in the same dataset and finds no consistent pattern. The result: negative R² scores, not because the data is bad, but because a critical variable is invisible.
 
-> If you know the hidden variable for *some* rows — even a small fraction — that is enough to train a model and recover the hidden variable for all the remaining rows.
+```
+Baseline (without hidden variable):   R² = -0.17  → model fails
+Oracle   (with true hidden variable):  R² =  0.50  → strong performance
+```
 
-This means a dataset that looks incomplete is actually fully trainable. You are not blocked by missing values. You use what you know to fill in what you don't.
+This gap — between a failing model and a strong one — is explained entirely by a single missing variable. Model-T is designed to close that gap.
+
+---
+
+## The Solution
+
+Model-T treats the hidden variable not as missing data, but as a **recoverable quantity**.
+
+If domain knowledge lets you label even a fraction of your rows with confidence, the model can infer the hidden variable for every other row by mathematical inversion. A dataset that looks incomplete becomes fully trainable.
+
+In the cardiac example: rather than requiring a blood draw for every observation, Model-T acts as a **virtual sensor** — inferring the hidden hormonal state from purely mechanical observations, because the relationship between them is approximately linear.
+
+> **Note:** The cardiac example is illustrative. Model-T is domain-agnostic. The hidden variable can represent any latent quantity — a material property, a process setting, an environmental condition — as long as it influences the output and can be partially identified through rules.
 
 ---
 
@@ -22,58 +37,48 @@ This means a dataset that looks incomplete is actually fully trainable. You are 
 
 ### Step 1 — Partial labeling via rules
 
-Domain knowledge is encoded as rules that assign the hidden variable value for rows that meet certain conditions:
+Domain knowledge is encoded as rules that assign the hidden variable value for rows meeting certain conditions:
 
 ```
 if laser > 50 and m1 == 1  →  h = 3
 if laser < 20 and m1 == 0  →  h = 0
 ```
 
-These rules do not need to cover the whole dataset. In the example here, only **29.2% of training rows** were labeled this way. The rest had the hidden variable unknown.
+Rules do not need to cover the full dataset. In the reference experiment, only **29.2% of training rows** were labeled this way.
 
-### Step 2 — Train on the labeled subset
+### Step 2 — Phase 1 training on labeled rows
 
-A model is trained using only the rows where the hidden variable is known:
+A linear model is trained on the labeled subset:
 
 ```
 y = f(x₁, x₂, ..., xₙ, h)
 ```
 
-The model learns the relationship between all features — including the hidden variable — and the target output.
+The model learns the relationship between all observed features, the hidden variable, and the target output.
 
 ### Step 3 — Recover the hidden variable for unlabeled rows
 
-This is the key step. Because the model is linear, it can be **inverted**. For any unlabeled row where `y` is observed but `h` is unknown:
+Because the model is linear, it can be inverted. For any row where *y* is observed but *h* is unknown:
 
 ```
 h_estimated = (y_observed − base_prediction) / weight_of_h
 ```
 
-The model tells us what `h` must have been to produce the observed output. The estimate is clipped to the valid range defined by the rules.
+The estimate is clipped to the valid range defined by the rules. After this step, every training row has an *h* value — either rule-assigned or model-recovered.
 
-After this step, **every training row has an h value** — either from the rules directly, or recovered through the model.
+### Step 4 — Phase 2 retraining on the full dataset
 
-### Step 4 — Retrain on the complete dataset
+With all hidden variable values filled in, the model is retrained on the complete training set. This second model is stronger because it has seen all rows, not just the rule-labeled fraction.
 
-With all hidden variable values filled in, the model is retrained on the full training set. This second model is stronger because it has seen all 800 rows, not just the 234 rule-labeled ones.
+### Step 5 — Range prediction at test time
 
-### Step 5 — Range prediction for test rows
+At test time, the hidden variable is unknown. Rather than guessing a single value, the model:
 
-At test time, the hidden variable is still unknown. Rather than guessing a single value, the model finds the k most similar labeled training rows and uses their hidden variable values to estimate a plausible range `[h_low, h_high]`. This range is propagated through the model to produce a prediction interval `[y_low, y_high]`.
+1. Finds the *k* most similar labeled training rows
+2. Uses their hidden variable values to estimate a plausible range `[h_low, h_high]`
+3. Propagates this range through the model to produce a **prediction interval** `[y_low, y_high]`
 
----
-
-## Why Partial Knowledge Is Enough
-
-The insight is that the hidden variable does not need to be measured for every row. As long as:
-
-1. A subset of rows can be labeled with reasonable confidence (via rules or any other method)
-2. The model can learn the relationship between the hidden variable and the output from that subset
-3. The relationship is approximately linear or monotonic
-
-...then the model itself becomes the tool for recovering the hidden variable everywhere else.
-
-This turns what looks like an incomplete dataset into a fully trainable one.
+This prevents the confident-but-wrong errors of single-point predictors. In high-stakes settings, knowing that a prediction falls in `[0, 3]` rather than being a fragile point estimate is often more useful.
 
 ---
 
@@ -82,14 +87,14 @@ This turns what looks like an incomplete dataset into a fully trainable one.
 ```
 Full dataset
      │
-     ├─────────────────────────────────────────────┐
-     ▼                                             │
-Train / Test split                                 │ Test set held out
-     │                                             │ (never sees rules)
+     ├─────────────────────────────────────┐
+     ▼                                     │ Test set held out
+Train / Test split                         │ (never sees rules)
+     │
      ▼
 Apply rules to train set
-→ Some rows now have h known (29.2% in this example)
-→ Most rows still have h unknown
+→ ~30% of rows: h known
+→ ~70% of rows: h unknown
      │
      ▼
 Rule quality check
@@ -98,11 +103,11 @@ Rule quality check
      │
      ▼
 Phase 1 — Train on labeled rows only
-→ Model learns: y = f(observed features, h)
+→ y = f(observed features, h)
      │
      ▼
 Recover h for unlabeled rows
-→ Invert: h = (y − base_pred) / w_h
+→ h = (y − base_pred) / w_h
 → Clip to valid range
 → All training rows now have h
      │
@@ -116,8 +121,8 @@ Similarity search on test rows
 → h range = [10th pct, 90th pct] of neighbor h values
      │
      ▼
-Predict range for test rows
-→ Evaluate model at h_low and h_high
+Predict interval for test rows
+→ Evaluate at h_low and h_high
 → Output: target_low, target_high per row
 ```
 
@@ -127,10 +132,10 @@ Predict range for test rows
 
 Dataset: 1000 rows, 6 features, 1 hidden variable with 4 possible values.
 
-| | |
+| Metric | Value |
 |---|---|
 | Training rows | 800 |
-| Rule-labeled rows (h known from rules) | 234 (29.2%) |
+| Rule-labeled rows (h known) | 234 (29.2%) |
 | Rows with h recovered by model | 566 (70.8%) |
 | Test rows | 200 |
 | True target inside predicted range | 162 / 200 |
@@ -140,28 +145,31 @@ Starting from less than 30% labeled data, the framework recovers the full traini
 
 ---
 
+## Why This Is Different from Standard Imputation
+
+| | Standard ML (drop/impute) | Model-T |
+|---|---|---|
+| Missing variable | Ignored or filled with mean | Physically recovered via inversion |
+| Uses domain knowledge | No | Yes (rule-based priming) |
+| Output | Single point prediction | Calibrated interval |
+| Handles hidden causal drivers | No | Yes |
+| Requires full labels | Yes | No — 15–30% is sufficient |
+
+---
+
 ## Project Structure
 
 ```
 project/
 │
-|
-│- Master_data.csv          # dataset: observed features + target
-│
-|
-│-NEW_RULE.json            # rules for partial hidden variable labeling
-│
-|
-│- model_t_pipeline.ipynb   # full pipeline
-│
+├── Master_data.csv          # dataset: observed features + target
+├── NEW_RULE.json            # rules for partial hidden variable labeling
+├── model_t_pipeline.ipynb   # full pipeline
 ├── requirements.txt
 └── README.md
 ```
 
-
-```
-
-Rules use pandas `eval`-compatible condition strings. A row is only labeled once — first matching rule applies, later rules are skipped for that row.
+Rules use pandas `eval`-compatible condition strings. A row is labeled only once — the first matching rule applies.
 
 ---
 
@@ -174,14 +182,14 @@ CONFIG = {
     "output_path":   "data/results.csv",
 
     "test_size":     0.2,
-    "random_seed":   42,       # used for both train/test split and numpy RNG
+    "random_seed":   42,
 
     "learning_rate": 0.001,
     "epochs":        300,
     "batch_size":    32,
 
-    "k_neighbors":   10,       # neighbors used to estimate hidden variable range
-    "buffer_pct":    0.10,     # 10% uncertainty buffer added to prediction range
+    "k_neighbors":   10,      # neighbors used to estimate h range
+    "buffer_pct":    0.10,    # 10% uncertainty buffer on prediction range
 }
 ```
 
@@ -193,7 +201,7 @@ CONFIG = {
 git clone https://github.com/your-username/model-t
 cd model-t
 pip install -r requirements.txt
-jupyter notebook notebooks/model_t_pipeline.ipynb
+jupyter notebook model_t_pipeline.ipynb
 ```
 
 **requirements.txt**
@@ -209,22 +217,22 @@ jupyter
 ## Adapting to Your Own Dataset
 
 1. Prepare a CSV with observed features and a target column. The hidden variable column does not need to exist — the framework creates it.
-2. Write rules that can label at least 15% of your training rows with known hidden variable values.
-3. Run the quality checker — all 5 checks must pass before training.
-4. Update CONFIG paths and run the notebook.
+2. Write rules that label at least **15% of training rows** with known hidden variable values.
+3. Run the quality checker — all 5 checks must pass before training proceeds.
+4. Update `CONFIG` paths and run the notebook.
 
-The framework is domain-agnostic. The hidden variable can represent anything — a material property, a process setting, an environmental condition — as long as it influences the output and can be partially identified through rules.
+The framework is domain-agnostic. The hidden variable can be anything that influences the output and can be partially identified through rules.
 
 ---
 
 ## Limitations
 
-| | |
+| Limitation | Detail |
 |---|---|
 | Linear relationship required | Model inversion assumes h has a roughly linear effect on the output. Works for smooth or monotonic systems. |
-| Single hidden variable | Inverting for multiple unknowns simultaneously is underdetermined. Current scope handles one hidden variable. |
-| Rules must be meaningful | Weak or conflicting rules → poor Phase 1 model → poor recovery. The quality checker catches the worst cases. |
-| Reproducibility | Call `np.random.seed(CONFIG["random_seed"])` before weight initialization to ensure identical results across runs. |
+| Single hidden variable | Inverting for multiple unknowns simultaneously is underdetermined. Current scope handles one. |
+| Rules must be meaningful | Weak or conflicting rules lead to poor Phase 1 recovery. The quality checker catches the worst cases. |
+| Reproducibility | Call `np.random.seed(CONFIG["random_seed"])` before weight initialization for identical results across runs. |
 
 ---
 
@@ -235,6 +243,3 @@ The framework is domain-agnostic. The hidden variable can represent anything —
 - Automatic rule discovery — learn labeling conditions from data
 - Conformal prediction for statistically calibrated coverage guarantees
 - End-to-end training of partial labeling and recovery together
-
----
-
