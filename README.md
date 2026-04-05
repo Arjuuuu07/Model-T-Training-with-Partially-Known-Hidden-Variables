@@ -307,21 +307,7 @@ CONFIG = {
 ## Project Structure
 
 ```
-project/
-│
-├── data/
-│   ├── MASTERDATA.csv           # observed features + target column
-│   └── model_T_results.csv      # output: intervals per test row
-│
-├── rules/
-│   └── json_RULE.json           # domain rules for partial h labeling
-│
-├── model_T_pipeline_REAL.ipynb  # full pipeline
-├── requirements.txt
-└── README.md
-```
 
----
 
 ## Adapting to Your Own Dataset
 
