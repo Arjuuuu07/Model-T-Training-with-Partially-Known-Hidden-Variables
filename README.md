@@ -1,208 +1,238 @@
 # Model-T
+### Training with Partially Known Hidden Variables
 
-**Training with Partially Known Hidden Variables**
-
-> Rule-Primed Inversion · Calibrated Interval Prediction · No Full Labels Required
-
----
-
-## Overview
-
-Model-T is a machine learning framework for systems where a key variable is only measurable for a fraction of your data. Instead of imputing or ignoring it, Model-T **recovers it mathematically** using model inversion — then produces calibrated prediction intervals at test time.
-
-Starting from less than 30% labeled rows, the framework fills in the hidden variable for the entire training set and achieves **84.5% interval coverage** on held-out test data.
+> *Rule-Primed Inversion · Calibrated Interval Prediction · No Full Labels Required*
 
 ---
 
-## The Problem
+## The Problem This Solves
 
-In many real-world systems, the relationship between inputs and outputs is governed by a variable that is expensive, delayed, or impossible to measure consistently.
+Many real-world systems — biological, industrial, physical — are governed by variables that cannot be measured consistently. The variable exists. It drives the output. But you cannot see it for most of your data.
 
-A standard model trained without it sees contradictory patterns in the data and learns no consistent relationship:
+A sensor reading that only fires under specific conditions. A molecular state that is measurable in a lab but not in the field. A process parameter that is logged only when an engineer manually records it. These are not edge cases — they are the norm in applied science and engineering.
 
-```
-Baseline (without hidden variable):  R² =  0.0096
-Oracle   (with true hidden variable): R² = ~0.50
-```
+The standard response is to either drop the variable entirely or fill it using statistical imputation. Both approaches treat the missing variable as a data problem. Model-T treats it as a physics problem: **if the variable drives the output, the output contains information about the variable.** Model-T extracts that information directly.
 
-This gap is caused entirely by one missing variable. Model-T is designed to close it — without requiring full measurement.
+---
+
+## Why Hidden Variables Matter Especially in Biological and Complex Systems
+
+Biological systems are among the hardest to model precisely because they operate under layers of hidden state. Gene expression, receptor occupancy, intracellular signaling, metabolic flux — these are variables that govern measurable outcomes but are almost never observed directly in clinical or field data. The same is true for ecological systems, neurological systems, and many chemical processes.
+
+The challenge is not just that the data is small — it is that the hidden variable creates what looks like random noise in the observed data. A model trained without it will see the same inputs produce wildly different outputs and conclude that the system is stochastic when it is not. It is deterministic under a variable that is invisible to the model.
+
+**If you have partial knowledge — even for 15–30% of your data — about what that hidden variable looks like under certain conditions, Model-T can use that partial knowledge to recover approximate values for the rest, and then produce a calibrated range of possible outputs at prediction time.**
+
+This matters especially when:
+- You cannot afford to measure the hidden variable for every sample (expensive assays, destructive testing, delayed lab results)
+- You have domain knowledge encoded as rules or thresholds — partial, not complete — about when the variable takes certain values
+- A point prediction is not trustworthy without knowing the uncertainty introduced by the hidden state
+- You are working with small datasets where statistical imputation introduces more noise than signal
+
+Rather than pretending the hidden variable does not exist or guessing its value blindly, Model-T gives you a range: *"given what we observed and what we know, the true output lies somewhere between these two values."* That range is the honest answer when a hidden variable is involved.
 
 ---
 
 ## The Core Idea
 
-Most missing-data methods ask: *what value is statistically plausible here, given similar rows?*
+Standard missing-data methods ask:
+> *"What value is statistically plausible here, given similar rows?"*
 
-Model-T asks a different question: **given what I observed and what the output was, what must `h` have been?**
+Model-T asks a different question:
+> *"Given what I observed as input and what the output actually was — what must the hidden variable have been?"*
 
-This is **model inversion** — using the fitted model to back-calculate the hidden variable from residuals:
+This is **model inversion**. Because the model is linear, the inversion is exact:
 
 ```
-h_estimated = (y_observed − base_prediction) / weight_of_h
+h_estimated = (y_observed − prediction_without_h) / weight_of_h
 ```
 
-Because the model is linear, this inversion is exact. The recovered value is clipped to the valid range, and Phase 2 retrains on the full dataset with all `h` values filled in.
-
-This is mechanistically different from imputation, KNN filling, or EM. It uses the output to infer the cause — which standard gap-filling methods do not do.
+The recovered value is clipped to the valid range and used to retrain a stronger model on the full dataset. At test time, when the hidden variable is unknown, Model-T searches for the most similar training rows whose hidden variable was either rule-labeled or inversion-recovered, extracts the range of plausible values, and propagates that range through the model to produce a **prediction interval** rather than a fragile point estimate.
 
 ---
 
-## How It Works
+## How It Works — Step by Step
 
-### Step 1 — Partial labeling via rules
+### Step 1 — Encode Partial Knowledge as Rules
 
-Domain knowledge is encoded as rules that assign `h` for rows meeting certain conditions:
+Domain knowledge is written as condition-formula pairs in a JSON file. Each rule says: *"when these conditions hold, the hidden variable equals this formula."*
 
-```python
-if laser > 50 and m1 == 1  →  h = 3
-if laser < 20 and m1 == 0  →  h = 0
+```json
+{
+  "variables": {
+    "m5": { "range": [0, 3], "type": "continuous" }
+  },
+  "rules": [
+    {
+      "name": "band0_m1_off_m2_off",
+      "condition": "(m1 == 0) and (m2 == 0) and (laser < 4)",
+      "formula": "laser * 0.75"
+    },
+    {
+      "name": "band1_m1_on_m2_off",
+      "condition": "(m1 == 1) and (m2 == 0) and (laser >= 4) and (laser < 8)",
+      "formula": "(laser - 4) * 0.75"
+    }
+  ]
+}
 ```
 
-Rules use pandas `eval`-compatible condition strings. A row is labeled only once — the first matching rule applies. **15–30% coverage is sufficient.**
+Rules use pandas `eval`-compatible syntax. A row is labeled by the first rule it matches. **15–30% coverage is sufficient** to run the full pipeline.
 
-### Step 2 — Rule quality check (5 automated gates)
+---
 
-| Check | What it verifies |
+### Step 2 — Automated Rule Quality Check (5 Gates)
+
+Before any training begins, the pipeline runs 5 automated checks to verify the rules produce usable labeled data:
+
+| Check | What It Verifies |
 |---|---|
-| 1. Coverage | ≥ 15% of training rows labeled |
-| 2. Matrix rank | Rank equals number of features |
-| 3. Condition number | < 100 (well-conditioned system) |
-| 4. Feature variance | Every feature has std > 0 in labeled rows |
-| 5. h diversity | Hidden variable has ≥ 2 distinct values |
+| Coverage | ≥ 15% of training rows are labeled |
+| Matrix rank | Rank equals number of features (no redundancy) |
+| Condition number | < 100 — system is well-conditioned |
+| Feature variance | Every feature has std > 0 in labeled rows |
+| Hidden variable diversity | At least 2 distinct values of h in labeled rows |
 
-All 5 checks must pass before training proceeds.
-
-### Step 3 — Phase 1: Train on labeled rows
-
-```
-y = f(x₁, x₂, ..., xₙ, h)
-```
-
-A linear model learns the relationship between observed features, the hidden variable, and the target.
-
-### Step 4 — Recover `h` for unlabeled rows
-
-```
-h_estimated = (y_observed − base_prediction) / weight_of_h
-```
-
-Clipped to the valid range. Every training row now has an `h` value — either rule-assigned or inversion-recovered.
-
-### Step 5 — Phase 2: Retrain on the full dataset
-
-Retrained on all 800 rows with `h` filled in. Stronger than Phase 1 because it uses the complete training set.
-
-### Step 6 — Interval prediction at test time
-
-At test time `h` is unknown. The model finds the k most similar labeled training rows, uses their `h` distribution to estimate a range `[h_low, h_high]`, and propagates it through the model:
-
-```
-Output per test row: [target_low, target_high]
-```
-
-This produces calibrated uncertainty instead of a fragile point estimate.
+All 5 must pass before training proceeds. This prevents silent failures from weak or conflicting rules.
 
 ---
 
-## Pipeline
+### Step 3 — Phase 1: Train on Rule-Labeled Rows
+
+A linear model is trained on the subset of rows where the hidden variable is known from rules:
 
 ```
-Full dataset
-     │
-     ├──────────────────────────────┐
-     ▼                              │ Test set held out
-Train / Test split                  │ (rules never applied here)
-     │
-     ▼
-Apply rules to train set
-  → ~30% labeled
-  → ~70% unlabeled
-     │
-     ▼
-Rule quality check (5 gates)
-     │
-     ▼
-Phase 1 — Train on labeled rows only
-     │
-     ▼
-Recover h via inversion
-  → All training rows now have h
-     │
-     ▼
-Phase 2 — Retrain on full training set
-     │
-     ▼
-Similarity search on test rows
-  → k nearest labeled neighbors
-  → h range from neighbor h distribution
-     │
-     ▼
-Output: [target_low, target_high] per test row
+y = w₁x₁ + w₂x₂ + ... + wₙxₙ + wₕ·h + b
 ```
+
+This gives the model a first estimate of each feature's contribution, including the weight of the hidden variable `wₕ`.
+
+---
+
+### Step 4 — Recover the Hidden Variable via Inversion
+
+Using the Phase 1 model, the hidden variable is back-calculated for every unlabeled training row:
+
+```
+h_estimated = (y_observed − (w₁x₁ + ... + wₙxₙ + b)) / wₕ
+```
+
+The result is clipped to the valid range defined in the rules JSON. Every training row now has an h value — either rule-assigned or inversion-recovered. No statistical assumptions are made about the distribution of h.
+
+---
+
+### Step 5 — Phase 2: Retrain on the Full Dataset
+
+The model is retrained on all training rows with h filled in. Because Phase 2 uses the complete dataset rather than the 15–30% rule-labeled subset, it produces substantially stronger weight estimates.
+
+---
+
+### Step 6 — Interval Prediction at Test Time
+
+At test time, h is unknown and cannot be recovered (the true output is what we are trying to predict). Instead, the model finds the `k` most similar labeled training rows using a weighted similarity search — weighted by feature importance from the Phase 2 model. The h values from those neighbors define a range `[h_low, h_high]`, which is propagated through the model:
+
+```
+target_low  = model.predict(h = h_low)
+target_high = model.predict(h = h_high)
+```
+
+**Output per test row: `[target_low, target_high]`**
+
+This is a calibrated uncertainty interval — not a confidence interval in the statistical sense, but an honest expression of what the model does not know because h is hidden.
 
 ---
 
 ## Results
 
-**Dataset:** 1,000 rows · 6 features · 1 hidden variable (4 discrete values) · 29.2% rule-labeled
+**Dataset:** 10,000 rows · 6 features · 1 hidden variable · 29.9% rule-labeled  
+**Split:** 8,000 train / 2,000 test
 
-### Training summary
+### Training Summary
 
 | Metric | Value |
 |---|---|
-| Training rows | 800 |
-| Rule-labeled rows | 234 (29.2%) |
-| h recovered by inversion | 566 (70.8%) |
-| Test rows | 200 |
+| Training rows | 8,000 |
+| Rule-labeled rows | 2,394 (29.9%) |
+| h recovered by inversion | 5,606 (70.1%) |
+| Test rows | 2,000 |
 
-### Benchmark comparison
+### Rule Quality Check — All Passed
 
-| Method | Test R² | Interval output? |
+| Check | Result |
+|---|---|
+| Coverage ≥ 15% | ✅ 29.9% |
+| Matrix rank = n_features | ✅ 6 / 6 |
+| Condition number < 100 | ✅ 1.9 (excellent) |
+| Feature variance > 0 | ✅ All features |
+
+### Feature Weights Learned (Phase 2)
+
+| Feature | Normalized Weight | Role |
 |---|---|---|
-| No hidden var (baseline) | 0.0096 | No |
-| Mean imputation | -0.0921 | No |
-| KNN imputation (k=10) | 0.0155 | No |
-| MICE | 0.0118 | No |
-| EM algorithm | -0.6286 | No |
-| **Model-T (interval midpoint)** | **0.0251** | **Yes** |
-| Oracle (true h known) | ~0.50 | No — reference only |
+| laser | 0.584 | Dominant predictor |
+| m5 (hidden) | 0.539 | Second most important |
+| m4 | 0.114 | Minor |
+| m1 | 0.108 | Minor |
+| m3 | 0.101 | Minor |
+| m2 | 0.092 | Minor |
 
-### Interval coverage
+---
+
+## Evaluation
+
+Because Model-T produces intervals rather than point estimates, it must be evaluated differently from standard models. Two separate evaluation frameworks apply:
+
+### Point Prediction Methods — Evaluated by R²
+
+These methods predict a single value and are evaluated by how close that value is to the truth.
+
+| Method | Test R² |
+|---|---|
+| No hidden variable (floor) | 0.4897 |
+| Mean imputation | 0.4892 |
+| MICE | 0.4897 |
+| KNN imputation (k=10) | 0.4941 |
+| Oracle (true h known) | ~0.50 |
+
+### Interval Prediction — Model-T Evaluated by Coverage
+
+Model-T solves a harder problem: predict a calibrated range that contains the true value. The correct metric is **coverage (PICP — Prediction Interval Coverage Probability)**.
 
 | Metric | Value |
 |---|---|
-| Test rows inside predicted interval | 169 / 200 |
-| Coverage (PICP) | **84.5%** |
+| Test rows inside predicted interval | 1,814 / 2,000 |
+| **Coverage (PICP)** | **90.7%** |
+| Average interval width (target) | 25.3 units |
+| Median interval width (target) | 28.1 units |
+| Average interval width (hidden h) | 2.05 units |
 
-Model-T is the only method in this comparison that outputs a prediction interval. At test time, when `h` is unknown, an interval is the correct form of output — and 84.5% of true values fall inside it on held-out data.
+> R² and coverage are not interchangeable metrics. Comparing them directly is like judging a weather forecast that says "20–25°C" by asking whether 22.5° was the exact temperature. Model-T is not optimized for R² — it is optimized to give you a range that honestly reflects what is unknown.
 
 ---
 
 ## Why This Is Different from Standard Imputation
 
-| | Standard imputation | Model-T |
+| | Standard Imputation | Model-T |
 |---|---|---|
-| Missing variable | Filled statistically | Physically recovered via inversion |
-| Uses domain knowledge | No | Yes — rule-based priming |
-| Output | Single point estimate | Calibrated interval |
+| How h is estimated | Statistically (from similar rows) | Physically (from the output, via inversion) |
+| Uses domain knowledge | No | Yes — rules encode partial physics |
+| Output at test time | Single point estimate | Calibrated interval |
 | Handles hidden causal drivers | No | Yes |
 | Requires full labels | Yes | No — 15–30% sufficient |
+| What it communicates | A guess | A range with honest uncertainty |
 
 ---
 
-## Comparison to Existing Approaches
+## Comparison to Related Approaches
 
-**vs. Physics-Informed Neural Networks (PINN)**
-PINNs require a complete governing equation encoded as a differentiable loss. Model-T requires only partial domain knowledge — rules covering 15–30% of data. Better choice when the physics is known partially but not fully.
+**vs. Physics-Informed Neural Networks (PINNs)**  
+PINNs require a complete governing equation encoded as a differentiable loss term. Model-T requires only partial domain knowledge — rules covering 15–30% of data. It is the better choice when the physics is understood partially but not fully formalized.
 
-**vs. Structural Equation Modelling (SEM)**
-SEM requires a full causal graph with distributional assumptions upfront. Model-T requires only labeling rules with no distributional assumptions — simpler to deploy when the causal structure is partially understood.
+**vs. Structural Equation Modelling (SEM)**  
+SEM requires a full causal graph with explicit distributional assumptions. Model-T requires only labeling rules — no distributional assumptions, simpler to deploy when the causal structure is partially understood.
 
-**vs. Grey-box / Hybrid Models**
-Similar in spirit. Grey-box models use a known partial equation as the structural component. Model-T uses rules instead, making it accessible without equation-level domain expertise.
-
-**vs. Conformal Prediction**
-Conformal prediction produces statistically guaranteed intervals on any model. A natural next step is combining both: use Model-T's inversion to recover `h`, then wrap with conformal prediction for certified coverage.
+**vs. Conformal Prediction**  
+Conformal prediction produces statistically guaranteed intervals on any model. A natural extension of Model-T is combining both: use inversion to recover h, then wrap with conformal prediction for formally certified coverage guarantees.
 
 ---
 
@@ -210,21 +240,23 @@ Conformal prediction produces statistically guaranteed intervals on any model. A
 
 | Limitation | Detail |
 |---|---|
-| Linear relationship required | Inversion assumes `h` has a roughly linear effect on the output. Works for smooth or monotonic systems. |
-| Single hidden variable | Inverting for multiple unknowns simultaneously is underdetermined. Current scope handles one. |
-| Rules must be meaningful | Weak or conflicting rules lead to poor Phase 1 recovery. The quality checker catches the worst cases. |
-| Coverage not statistically guaranteed | 84.5% is empirical. A conformal prediction wrapper is needed for formal guarantees. |
+| Linear relationship required | Inversion assumes h has a roughly linear effect on the output. Applicable to smooth or monotonic systems. |
+| Single hidden variable | Inverting for multiple unknowns simultaneously is underdetermined. Current version handles one hidden variable. |
+| Rules must carry real signal | Weak or contradictory rules produce poor Phase 1 recovery. The quality checker prevents the worst cases but cannot substitute for meaningful domain knowledge. |
+| Coverage is empirical | 90.7% is measured on held-out data, not statistically guaranteed. A conformal wrapper is needed for formal guarantees. |
+
+The linear constraint is the most significant current limitation. Many biological and physical systems are nonlinear — enzyme kinetics, receptor saturation, gene regulatory networks. Extending Model-T to nonlinear models through approximate inversion or gradient-based back-calculation is the most important direction for future work.
 
 ---
 
 ## Future Work
 
-- Multiple hidden variables with regularized inversion
-- Nonlinear models (neural networks, gradient boosting) with approximate inversion
+- Nonlinear inversion via gradient-based or approximate methods (neural networks, gradient boosting)
+- Multiple hidden variables with regularized joint inversion
 - Conformal prediction wrapper for statistically certified coverage
-- Automatic rule discovery — learn labeling conditions from data
-- Benchmark against physics-informed baselines on real industrial datasets
-- End-to-end training of partial labeling and recovery together
+- Automatic rule discovery — learn labeling conditions from data rather than encoding them manually
+- Benchmark against physics-informed baselines on real biological and industrial datasets
+- Tighter interval prediction by learning the h-to-target mapping more precisely
 
 ---
 
@@ -234,7 +266,7 @@ Conformal prediction produces statistically guaranteed intervals on any model. A
 git clone https://github.com/your-username/model-t
 cd model-t
 pip install -r requirements.txt
-jupyter notebook model_t_pipeline.ipynb
+jupyter notebook model_T_pipeline_REAL.ipynb
 ```
 
 **requirements.txt**
@@ -250,23 +282,25 @@ jupyter
 
 ## Configuration
 
+All pipeline settings are controlled through a single `CONFIG` dictionary at the top of the notebook:
+
 ```python
 CONFIG = {
-    "dataset_path":     "data/Master_data.csv",
-    "rules_path":       "rules/NEW_RULE.json",
-    "output_path":      "data/results.csv",
+    "dataset_path":     "data/MASTERDATA.csv",
+    "rules_path":       "rules/json_RULE.json",
+    "output_path":      "data/model_T_results.csv",
+
     "test_size":        0.2,
     "random_seed":      42,
+
     "learning_rate":    0.001,
     "epochs":           300,
     "batch_size":       32,
+
     "k_neighbors":      10,
     "buffer_pct":       0.10,
-    "similarity_sigma": 1.0,
 }
 ```
-
-> Call `np.random.seed(CONFIG["random_seed"])` before weight initialization for reproducible results.
 
 ---
 
@@ -275,9 +309,14 @@ CONFIG = {
 ```
 project/
 │
-├── Master_data.csv          # dataset: observed features + target
-├── NEW_RULE.json            # rules for partial hidden variable labeling
-├── model_t_pipeline.ipynb   # full pipeline
+├── data/
+│   ├── MASTERDATA.csv           # observed features + target column
+│   └── model_T_results.csv      # output: intervals per test row
+│
+├── rules/
+│   └── json_RULE.json           # domain rules for partial h labeling
+│
+├── model_T_pipeline_REAL.ipynb  # full pipeline
 ├── requirements.txt
 └── README.md
 ```
@@ -286,9 +325,22 @@ project/
 
 ## Adapting to Your Own Dataset
 
-1. Prepare a CSV with observed features and a target column. The hidden variable column does not need to exist — the framework creates it.
-2. Write rules that label at least 15% of training rows with known `h` values.
-3. Run the quality checker — all 5 checks must pass before training proceeds.
-4. Update `CONFIG` paths and run the notebook.
+1. **Prepare your CSV** with observed features and a target column. The hidden variable column does not need to exist — the pipeline creates it.
 
-The framework is domain-agnostic. The hidden variable can be any latent quantity — a material property, a process setting, an environmental condition — as long as it influences the output and can be partially identified through rules.
+2. **Write rules** that label at least 15% of training rows with known h values. Rules must use `pandas eval`-compatible condition strings.
+
+3. **Run the quality checker** — all 5 gates must pass before training proceeds.
+
+4. **Update CONFIG paths** and run the notebook.
+
+The framework is domain-agnostic. The hidden variable can be any latent quantity — a molecular concentration, a process parameter, an environmental condition, a physiological state — as long as it influences the output and can be partially characterized through rules derived from domain knowledge.
+
+---
+
+## The Broader Principle
+
+Most real systems — biological, ecological, chemical, physical — do not operate in fully observable space. There is almost always a variable underneath that drives behavior and that we see only partially, or only under specific conditions, or only in retrospect.
+
+Model-T is built on the observation that partial knowledge, properly used, is more powerful than it appears. If you know the relationship between the hidden variable and the output even approximately, and if you can identify its value for even a fraction of your data, you can recover it for the rest — not by guessing, but by reading it from the output itself.
+
+The interval at the end is not a failure to predict precisely. It is the correct answer when something is genuinely unknown. A range that contains the truth 90% of the time is more useful than a point estimate that is confidently wrong.
