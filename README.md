@@ -305,15 +305,18 @@ CONFIG = {
 ---
 
 ## Project Structure
+
+```
 model-t/
 │
-├── MASTERDATA.csv                  # dataset: observed features + target
-├── json_RULE.json                  # domain rules for partial h labeling
-├── model_T_pipeline_REAL.ipynb     # full pipeline
-├── DATASET_CREATING_CODE.py        # script used to generate the dataset
-├── requirements.txt                # python dependencies
+├── MASTERDATA.csv                   # dataset: observed features + target
+├── json_RULE.json                   # domain rules for partial h labeling
+├── model_T_pipeline_REAL.ipynb      # full pipeline
+├── DATASET_CREATING_CODE.py         # script used to generate the dataset
+├── requirements.txt                 # python dependencies
 ├── LICENSE
 └── README.md
+```
 ```
 
 
