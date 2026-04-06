@@ -1,7 +1,6 @@
 # Model-T
-### Training with Partially Known Hidden Variables
-
-> *Rule-Primed Inversion · Calibrated Interval Prediction · No Full Labels Required*
+**Training with Partially Known Hidden Variables**
+Rule-Primed Inversion · Calibrated Interval Prediction · No Full Labels Required
 
 ---
 
@@ -11,7 +10,7 @@ Many real-world systems — biological, industrial, physical — are governed by
 
 A sensor reading that only fires under specific conditions. A molecular state that is measurable in a lab but not in the field. A process parameter that is logged only when an engineer manually records it. These are not edge cases — they are the norm in applied science and engineering.
 
-The standard response is to either drop the variable entirely or fill it using statistical imputation. Both approaches treat the missing variable as a data problem. Model-T treats it as a physics problem: **if the variable drives the output, the output contains information about the variable.** Model-T extracts that information directly.
+The standard response is to either drop the variable entirely or fill it using statistical imputation. Both approaches treat the missing variable as a data problem. Model-T treats it as a physics problem: if the variable drives the output, the output contains information about the variable. Model-T extracts that information directly.
 
 ---
 
@@ -21,33 +20,36 @@ Biological systems are among the hardest to model precisely because they operate
 
 The challenge is not just that the data is small — it is that the hidden variable creates what looks like random noise in the observed data. A model trained without it will see the same inputs produce wildly different outputs and conclude that the system is stochastic when it is not. It is deterministic under a variable that is invisible to the model.
 
-**If you have partial knowledge — even for 15–30% of your data — about what that hidden variable looks like under certain conditions, Model-T can use that partial knowledge to recover approximate values for the rest, and then produce a calibrated range of possible outputs at prediction time.**
+If you have partial knowledge — even for 15–30% of your data — about what that hidden variable looks like under certain conditions, Model-T can use that partial knowledge to recover approximate values for the rest, and then produce a calibrated range of possible outputs at prediction time.
 
 This matters especially when:
+
 - You cannot afford to measure the hidden variable for every sample (expensive assays, destructive testing, delayed lab results)
 - You have domain knowledge encoded as rules or thresholds — partial, not complete — about when the variable takes certain values
 - A point prediction is not trustworthy without knowing the uncertainty introduced by the hidden state
 - You are working with small datasets where statistical imputation introduces more noise than signal
 
-Rather than pretending the hidden variable does not exist or guessing its value blindly, Model-T gives you a range: *"given what we observed and what we know, the true output lies somewhere between these two values."* That range is the honest answer when a hidden variable is involved.
+Rather than pretending the hidden variable does not exist or guessing its value blindly, Model-T gives you a range: "given what we observed and what we know, the true output lies somewhere between these two values." That range is the honest answer when a hidden variable is involved.
 
 ---
 
 ## The Core Idea
 
 Standard missing-data methods ask:
-> *"What value is statistically plausible here, given similar rows?"*
+
+> "What value is statistically plausible here, given similar rows?"
 
 Model-T asks a different question:
-> *"Given what I observed as input and what the output actually was — what must the hidden variable have been?"*
 
-This is **model inversion**. Because the model is linear, the inversion is exact:
+> "Given what I observed as input and what the output actually was — what must the hidden variable have been?"
+
+This is model inversion. Because the model is linear, the inversion is exact:
 
 ```
 h_estimated = (y_observed − prediction_without_h) / weight_of_h
 ```
 
-The recovered value is clipped to the valid range and used to retrain a stronger model on the full dataset. At test time, when the hidden variable is unknown, Model-T searches for the most similar training rows whose hidden variable was either rule-labeled or inversion-recovered, extracts the range of plausible values, and propagates that range through the model to produce a **prediction interval** rather than a fragile point estimate.
+The recovered value is clipped to the valid range and used to retrain a stronger model on the full dataset. At test time, when the hidden variable is unknown, Model-T searches for the most similar training rows whose hidden variable was either rule-labeled or inversion-recovered, extracts the range of plausible values, and propagates that range through the model to produce a prediction interval rather than a fragile point estimate.
 
 ---
 
@@ -55,7 +57,7 @@ The recovered value is clipped to the valid range and used to retrain a stronger
 
 ### Step 1 — Encode Partial Knowledge as Rules
 
-Domain knowledge is written as condition-formula pairs in a JSON file. Each rule says: *"when these conditions hold, the hidden variable equals this formula."*
+Domain knowledge is written as condition-formula pairs in a JSON file. Each rule says: "when these conditions hold, the hidden variable equals this formula."
 
 ```json
 {
@@ -77,9 +79,7 @@ Domain knowledge is written as condition-formula pairs in a JSON file. Each rule
 }
 ```
 
-Rules use pandas `eval`-compatible syntax. A row is labeled by the first rule it matches. **15–30% coverage is sufficient** to run the full pipeline.
-
----
+Rules use pandas eval-compatible syntax. A row is labeled by the first rule it matches. 15–30% coverage is sufficient to run the full pipeline.
 
 ### Step 2 — Automated Rule Quality Check (5 Gates)
 
@@ -95,8 +95,6 @@ Before any training begins, the pipeline runs 5 automated checks to verify the r
 
 All 5 must pass before training proceeds. This prevents silent failures from weak or conflicting rules.
 
----
-
 ### Step 3 — Phase 1: Train on Rule-Labeled Rows
 
 A linear model is trained on the subset of rows where the hidden variable is known from rules:
@@ -105,9 +103,7 @@ A linear model is trained on the subset of rows where the hidden variable is kno
 y = w₁x₁ + w₂x₂ + ... + wₙxₙ + wₕ·h + b
 ```
 
-This gives the model a first estimate of each feature's contribution, including the weight of the hidden variable `wₕ`.
-
----
+This gives the model a first estimate of each feature's contribution, including the weight of the hidden variable wₕ.
 
 ### Step 4 — Recover the Hidden Variable via Inversion
 
@@ -119,24 +115,20 @@ h_estimated = (y_observed − (w₁x₁ + ... + wₙxₙ + b)) / wₕ
 
 The result is clipped to the valid range defined in the rules JSON. Every training row now has an h value — either rule-assigned or inversion-recovered. No statistical assumptions are made about the distribution of h.
 
----
-
 ### Step 5 — Phase 2: Retrain on the Full Dataset
 
-The model is retrained on all training rows with h filled in. Because Phase 2 uses the complete dataset rather than the 15–30% rule-labeled subset, it produces substantially stronger weight estimates.
-
----
+The model is retrained on all training rows with h filled in. Because Phase 2 uses the complete dataset rather than the 15–30% rule-labeled subset, it produces more stable weight estimates using the full training set.
 
 ### Step 6 — Interval Prediction at Test Time
 
-At test time, h is unknown and cannot be recovered (the true output is what we are trying to predict). Instead, the model finds the `k` most similar labeled training rows using a weighted similarity search — weighted by feature importance from the Phase 2 model. The h values from those neighbors define a range `[h_low, h_high]`, which is propagated through the model:
+At test time, h is unknown and cannot be recovered (the true output is what we are trying to predict). Instead, the model finds the k most similar labeled training rows using a weighted similarity search — weighted by feature importance from the Phase 2 model. The h values from those neighbors define a range [h_low, h_high], which is propagated through the model:
 
 ```
 target_low  = model.predict(h = h_low)
 target_high = model.predict(h = h_high)
 ```
 
-**Output per test row: `[target_low, target_high]`**
+Output per test row: `[target_low, target_high]`
 
 This is a calibrated uncertainty interval — not a confidence interval in the statistical sense, but an honest expression of what the model does not know because h is hidden.
 
@@ -176,13 +168,11 @@ This is a calibrated uncertainty interval — not a confidence interval in the s
 | m3 | 0.101 | Minor |
 | m2 | 0.092 | Minor |
 
----
-
-## Evaluation
+### Evaluation
 
 Because Model-T produces intervals rather than point estimates, it must be evaluated differently from standard models. Two separate evaluation frameworks apply:
 
-### Point Prediction Methods — Evaluated by R²
+**Point Prediction Methods — Evaluated by R²**
 
 These methods predict a single value and are evaluated by how close that value is to the truth.
 
@@ -194,19 +184,19 @@ These methods predict a single value and are evaluated by how close that value i
 | KNN imputation (k=10) | 0.4941 |
 | Oracle (true h known) | ~0.50 |
 
-### Interval Prediction — Model-T Evaluated by Coverage
+**Interval Prediction — Model-T Evaluated by Coverage**
 
-Model-T solves a harder problem: predict a calibrated range that contains the true value. The correct metric is **coverage (PICP — Prediction Interval Coverage Probability)**.
+Model-T solves a harder problem: predict a calibrated range that contains the true value. The correct metric is coverage (PICP — Prediction Interval Coverage Probability).
 
 | Metric | Value |
 |---|---|
-| Test rows inside predicted interval | 1,814 / 2,000 |
-| **Coverage (PICP)** | **90.7%** |
+| Test rows inside predicted interval | 1,815 / 2,000 |
+| Coverage (PICP) | 90.75% |
 | Average interval width (target) | 25.3 units |
 | Median interval width (target) | 28.1 units |
 | Average interval width (hidden h) | 2.05 units |
 
-> R² and coverage are not interchangeable metrics. Comparing them directly is like judging a weather forecast that says "20–25°C" by asking whether 22.5° was the exact temperature. Model-T is not optimized for R² — it is optimized to give you a range that honestly reflects what is unknown.
+R² and coverage are not interchangeable metrics. Comparing them directly is like judging a weather forecast that says "20–25°C" by asking whether 22.5° was the exact temperature. Model-T is not optimized for R² — it is optimized to give you a range that honestly reflects what is unknown.
 
 ---
 
@@ -243,7 +233,8 @@ Conformal prediction produces statistically guaranteed intervals on any model. A
 | Linear relationship required | Inversion assumes h has a roughly linear effect on the output. Applicable to smooth or monotonic systems. |
 | Single hidden variable | Inverting for multiple unknowns simultaneously is underdetermined. Current version handles one hidden variable. |
 | Rules must carry real signal | Weak or contradictory rules produce poor Phase 1 recovery. The quality checker prevents the worst cases but cannot substitute for meaningful domain knowledge. |
-| Coverage is empirical | 90.7% is measured on held-out data, not statistically guaranteed. A conformal wrapper is needed for formal guarantees. |
+| Coverage is empirical | 90.75% is measured on held-out data, not statistically guaranteed. A conformal wrapper is needed for formal guarantees. |
+| R² ceiling | The dataset has an R² ceiling of ~0.50 even with true h known (oracle), indicating residual variance not explained by the observed features. This is a property of the dataset, not the method. |
 
 The linear constraint is the most significant current limitation. Many biological and physical systems are nonlinear — enzyme kinetics, receptor saturation, gene regulatory networks. Extending Model-T to nonlinear models through approximate inversion or gradient-based back-calculation is the most important direction for future work.
 
@@ -317,8 +308,8 @@ model-t/
 ├── LICENSE
 └── README.md
 ```
-```
 
+---
 
 ## Adapting to Your Own Dataset
 
